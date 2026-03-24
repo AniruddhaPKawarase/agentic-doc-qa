@@ -1,0 +1,34 @@
+# ── Core ──────────────────────────────────────────────
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-dotenv>=1.0.0
+python-multipart>=0.0.6
+
+# ── OpenAI ────────────────────────────────────────────
+openai>=1.30.0
+tiktoken>=0.7.0
+
+# ── Vector Store ──────────────────────────────────────
+faiss-cpu>=1.7.4
+numpy>=1.24.0
+
+# ── File Processing ───────────────────────────────────
+pdfplumber>=0.10.0
+PyPDF2>=3.0.0
+python-docx>=1.1.0
+openpyxl>=3.1.0
+chardet>=5.2.0
+
+# ── Caching & Async ──────────────────────────────────
+cachetools>=5.3.0
+httpx>=0.25.0
+redis>=5.0.0
+
+# ── SSE Streaming ────────────────────────────────────
+sse-starlette>=1.6.0
+
+# ── Settings ─────────────────────────────────────────
+pydantic-settings>=2.0.0
+
+# ── S3 Storage (Phase 7) ──────────────────────────────
+boto3>=1.34.0

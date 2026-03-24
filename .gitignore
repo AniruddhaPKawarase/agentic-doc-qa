@@ -1,0 +1,51 @@
+# Credentials & secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+credentials.*
+secrets.*
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs & cache
+*.log
+.pytest_cache/
+.mypy_cache/
+*.sqlite
+*.db
+
+# FAISS indexes (large binary)
+*.bin
+*.faiss
+
+# Uploaded files (user data)
+uploads/
+sessions/
+
+# Claude Code internal
+CLAUDE.md
+claude_code_config.json

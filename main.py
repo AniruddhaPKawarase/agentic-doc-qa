@@ -1,0 +1,186 @@
+"""
+Document Q&A Agent — FastAPI Application Entry Point.
+──────────────────────────────────────────────────────────────────────────────
+Port: 8006 | Prefix: /docqa/
+
+Upload documents and ask questions answered strictly from uploaded content.
+Per-session FAISS indices for data isolation.
+
+Endpoints:
+    POST /api/upload           — Upload files to a session
+    POST /api/chat             — Blocking Q&A
+    POST /api/chat/stream      — SSE streaming Q&A
+    GET  /api/sessions         — List sessions
+    GET  /api/sessions/{id}    — Session detail
+    DELETE /api/sessions/{id}  — Delete session
+    GET  /health               — Health check
+"""
+
+import os
+import logging
+from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from config import get_settings
+from services.file_processor import FileProcessor
+from services.embedding_service import EmbeddingService
+from services.index_service import IndexService
+from services.retrieval_service import RetrievalService
+from services.generation_service import GenerationService
+from services.session_service import SessionService
+from services.hallucination_guard import HallucinationGuard
+from services.token_tracker import TokenTracker
+from services.cache_service import CacheService
+from routers import upload, chat, sessions, converse
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("docqa")
+
+
+# ── Lifespan ─────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize all services on startup, cleanup on shutdown."""
+    settings = get_settings()
+
+    logger.info("Initializing Document Q&A Agent services...")
+
+    # Create services
+    file_processor = FileProcessor(
+        chunk_size=settings.chunk_size_tokens,
+        chunk_overlap=settings.chunk_overlap_tokens,
+    )
+    embedding_service = EmbeddingService(settings)
+    index_service = IndexService()
+    retrieval_service = RetrievalService(embedding_service, index_service, settings)
+    generation_service = GenerationService(settings)
+    session_service = SessionService(max_history_messages=settings.max_history_messages)
+    hallucination_guard = HallucinationGuard(
+        threshold=settings.groundedness_threshold,
+        enabled=settings.hallucination_guard_enabled,
+    )
+    token_tracker = TokenTracker(
+        chat_model=settings.openai_chat_model,
+        embedding_model=settings.openai_embedding_model,
+    )
+    cache_service = CacheService(
+        l1_maxsize=settings.cache_l1_maxsize,
+        l1_ttl=settings.cache_l1_ttl,
+        redis_url=settings.redis_url,
+    )
+
+    # Attach to app.state for dependency injection
+    app.state.settings = settings
+    app.state.file_processor = file_processor
+    app.state.embedding_service = embedding_service
+    app.state.index_service = index_service
+    app.state.retrieval_service = retrieval_service
+    app.state.generation_service = generation_service
+    app.state.session_service = session_service
+    app.state.hallucination_guard = hallucination_guard
+    app.state.token_tracker = token_tracker
+    app.state.cache_service = cache_service
+
+    logger.info(
+        f"Document Q&A Agent ready | "
+        f"Model: {settings.openai_chat_model} | "
+        f"Embedding: {settings.openai_embedding_model} | "
+        f"Max file: {settings.max_file_size_mb}MB"
+    )
+
+    yield
+
+    # Cleanup
+    logger.info("Shutting down Document Q&A Agent...")
+    await cache_service.close()
+
+
+# ── App ──────────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="VCS Document Q&A Agent",
+    description="Upload documents and ask questions — RAG with per-session FAISS indices.",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount routers
+app.include_router(converse.router)   # unified upload+query (UI-friendly)
+app.include_router(upload.router)
+app.include_router(chat.router)
+app.include_router(sessions.router)
+
+
+# ── Root + Health ────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def root():
+    """Service overview."""
+    return {
+        "name": "VCS Document Q&A Agent",
+        "version": "1.0.0",
+        "description": "Upload documents and ask questions based on their content",
+        "endpoints": {
+            "converse": "POST /api/converse",
+            "converse_stream": "POST /api/converse/stream",
+            "upload": "POST /api/upload",
+            "chat": "POST /api/chat",
+            "stream": "POST /api/chat/stream",
+            "sessions": "GET /api/sessions",
+            "session_detail": "GET /api/sessions/{id}",
+            "delete_session": "DELETE /api/sessions/{id}",
+            "session_files": "GET /api/sessions/{id}/files",
+            "health": "GET /health",
+        },
+    }
+
+
+@app.get("/health")
+async def health():
+    """Health check."""
+    settings = app.state.settings
+    index_service = app.state.index_service
+    session_service = app.state.session_service
+
+    sessions = session_service.list_sessions()
+    indices = index_service.list_sessions()
+
+    return {
+        "status": "ok",
+        "model": settings.openai_chat_model,
+        "embedding_model": settings.openai_embedding_model,
+        "active_sessions": len(sessions),
+        "total_indexed_vectors": sum(indices.values()),
+        "max_file_size_mb": settings.max_file_size_mb,
+    }
+
+
+# ── Entry Point ──────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("DOCQA_PORT", "8006"))
+    host = os.getenv("DOCQA_HOST", "0.0.0.0")
+
+    logger.info(f"Starting Document Q&A Agent on {host}:{port}")
+    uvicorn.run(app, host=host, port=port)
