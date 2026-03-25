@@ -75,9 +75,18 @@ class SessionService:
         return session
 
     def get_session(self, session_id: str) -> Optional[Session]:
-        """Get session by ID."""
+        """Get session by ID. Falls back to S3 if not in memory."""
         with self._lock:
-            return self._sessions.get(session_id)
+            session = self._sessions.get(session_id)
+            if session:
+                return session
+        # S3 fallback: try loading from S3 if not in memory
+        session = self._load_from_s3(session_id)
+        if session:
+            with self._lock:
+                self._sessions[session_id] = session
+            logger.info(f"Session {session_id} restored from S3 (cache miss)")
+        return session
 
     def get_or_create(self, session_id: Optional[str] = None) -> Session:
         """Get existing session or create new one."""
@@ -140,11 +149,12 @@ class SessionService:
             self._persist_to_s3(session)
 
     def add_tokens(self, session_id: str, tokens: int) -> None:
-        """Accumulate token count."""
+        """Accumulate token count and persist to S3."""
         with self._lock:
             session = self._sessions.get(session_id)
             if session:
                 session.total_tokens_used += tokens
+                self._persist_to_s3(session)
 
     def build_history_messages(self, session_id: str) -> List[Dict]:
         """
@@ -200,6 +210,41 @@ class SessionService:
             ]
 
     # ── S3 Persistence (Phase 7) ──────────────────────────────────────────
+
+    def _load_from_s3(self, session_id: str) -> Optional[Session]:
+        """Load a single session from S3 by session_id."""
+        import os
+        if os.getenv("STORAGE_BACKEND", "local") != "s3":
+            return None
+        try:
+            import sys, json
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+            from s3_utils.operations import download_bytes
+            from s3_utils.helpers import docqa_session_meta_key
+            s3_prefix = os.getenv("S3_AGENT_PREFIX", "document-qa-agent")
+            s3_key = docqa_session_meta_key(s3_prefix, session_id)
+            raw = download_bytes(s3_key)
+            if raw:
+                data = json.loads(raw.decode("utf-8"))
+                session = Session(
+                    session_id=data["session_id"],
+                    created_at=data.get("created_at", ""),
+                    total_tokens_used=data.get("total_tokens_used", 0),
+                    file_hashes=set(data.get("file_hashes", [])),
+                )
+                session.history = [
+                    ConversationTurn(
+                        role=t["role"],
+                        content=t["content"],
+                        groundedness=t.get("groundedness"),
+                        timestamp=t.get("timestamp", ""),
+                    )
+                    for t in data.get("history", [])
+                ]
+                return session
+        except Exception as e:
+            logger.warning(f"S3 session load failed for {session_id}: {e}")
+        return None
 
     def _persist_to_s3(self, session: Session) -> None:
         """Write-behind: serialize session to JSON and upload to S3."""
