@@ -168,12 +168,19 @@ async def _upload_phase(
     return file_results, new_chunks
 
 
-async def _query_phase(request: Request, session_id: str, query: str) -> dict:
+async def _query_phase(
+    request: Request,
+    session_id: str,
+    query: str,
+    uploaded_file_names: Optional[List[str]] = None,
+) -> dict:
     """
     Run the full RAG pipeline for a query against the session's FAISS index.
     Returns a plain dict with all response fields.
-    Raises HTTPException on hard failures (no indexed content, LLM error).
-    Session is never rolled back here — files remain indexed regardless.
+
+    Args:
+        uploaded_file_names: Files uploaded in THIS request. When provided,
+            retrieval is scoped to those files only (file-aware retrieval v2).
     """
     session_service = request.app.state.session_service
     retrieval_service = request.app.state.retrieval_service
@@ -186,13 +193,31 @@ async def _query_phase(request: Request, session_id: str, query: str) -> dict:
     pipeline_start = time.perf_counter()
     log = PipelineTokenLog()
 
-    # ── Cache check ───────────────────────────────────────────────────────
-    cached = await cache_service.get(session_id, query)
-    if cached:
-        return {**cached, "cached": True}
+    # ── File scope resolution ─────────────────────────────────────────────
+    from services.retrieval_service import resolve_file_scope
 
-    # ── Retrieve ──────────────────────────────────────────────────────────
-    retrieval = await retrieval_service.retrieve(session_id, query)
+    # Get all file names in this session for reference matching
+    session = session_service.get_session(session_id)
+    session_file_names = [f.file_name for f in (session.files if session else [])]
+
+    target_files, scope_mode = resolve_file_scope(
+        uploaded_file_names=uploaded_file_names or [],
+        query=query,
+        session_file_names=session_file_names,
+    )
+
+    # ── Cache check (skip cache when scoped to specific files) ────────────
+    if scope_mode == "global":
+        cached = await cache_service.get(session_id, query)
+        if cached:
+            return {**cached, "cached": True}
+
+    # ── Retrieve (with file scoping) ──────────────────────────────────────
+    retrieval = await retrieval_service.retrieve(
+        session_id, query,
+        target_files=target_files,
+        scope_mode=scope_mode,
+    )
     log.record_step(
         "retrieval",
         embedding_tokens=retrieval.embedding_tokens,
@@ -236,9 +261,13 @@ async def _query_phase(request: Request, session_id: str, query: str) -> dict:
         for chunk, score in retrieval.chunks
     ]
 
-    # ── Generate ──────────────────────────────────────────────────────────
+    # ── Generate (file-aware) ────────────────────────────────────────────
     history = session_service.build_history_messages(session_id)
-    result = await generation_service.generate(query, context, history)
+    result = await generation_service.generate(
+        query, context, history,
+        current_files=target_files or None,
+        scope_mode=scope_mode,
+    )
     log.record_step(
         "generation",
         prompt_tokens=result["prompt_tokens"],
@@ -365,8 +394,14 @@ async def converse(
             },
         )
 
-    # ── Phase 2: Query ────────────────────────────────────────────────────
-    data = await _query_phase(request, sid, query)
+    # Collect uploaded file names (processed + duplicate_skipped) for scoping
+    uploaded_file_names = [
+        fr.file_name for fr in file_results
+        if fr.status in ("processed", "duplicate_skipped")
+    ]
+
+    # ── Phase 2: Query (file-aware) ───────────────────────────────────────
+    data = await _query_phase(request, sid, query, uploaded_file_names=uploaded_file_names)
 
     # Refresh session cookie on every response
     _set_session_cookie(response, sid, settings.cookie_secure)

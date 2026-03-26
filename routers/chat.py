@@ -59,8 +59,22 @@ async def _run_pipeline(request: Request, body: ChatRequest):
     if cached:
         return {**cached, "cached": True}
 
-    # ── Retrieve ──────────────────────────────────────────────────────
-    retrieval = await retrieval_service.retrieve(body.session_id, body.query)
+    # ── File scope resolution (chat = no file upload, but user may reference a file) ─
+    from services.retrieval_service import resolve_file_scope
+    session = session_service.get_session(body.session_id)
+    session_file_names = [f.file_name for f in (session.files if session else [])]
+    target_files, scope_mode = resolve_file_scope(
+        uploaded_file_names=[],  # chat endpoint never has uploads
+        query=body.query,
+        session_file_names=session_file_names,
+    )
+
+    # ── Retrieve (with file scoping if user referenced a file) ─────────
+    retrieval = await retrieval_service.retrieve(
+        body.session_id, body.query,
+        target_files=target_files,
+        scope_mode=scope_mode,
+    )
     log.record_step(
         "retrieval",
         embedding_tokens=retrieval.embedding_tokens,
@@ -103,9 +117,13 @@ async def _run_pipeline(request: Request, body: ChatRequest):
         for chunk, score in retrieval.chunks
     ]
 
-    # ── Generate ──────────────────────────────────────────────────────
+    # ── Generate (file-aware) ────────────────────────────────────────
     history = session_service.build_history_messages(body.session_id)
-    result = await generation_service.generate(body.query, context, history)
+    result = await generation_service.generate(
+        body.query, context, history,
+        current_files=target_files or None,
+        scope_mode=scope_mode,
+    )
 
     log.record_step(
         "generation",
