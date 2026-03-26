@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4o-mini"
+    openai_vision_model: str = "gpt-4o"  # Vision model for image/drawing analysis (gpt-4o has better vision than gpt-4o-mini)
     openai_max_output_tokens: int = 2048
 
     # ── Retrieval ─────────────────────────────────────
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
     # ── Upload ────────────────────────────────────────
     max_file_size_mb: int = 20
     max_files_per_upload: int = 10
-    allowed_extensions: str = ".pdf,.docx,.xlsx,.xls,.txt,.csv,.json"
+    allowed_extensions: str = ".pdf,.docx,.xlsx,.xls,.txt,.csv,.json,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tiff,.tif,.xml,.html,.htm,.svg,.md,.yaml,.yml,.log,.ini,.cfg"
 
     # ── Session ───────────────────────────────────────
     session_ttl_hours: int = 24
