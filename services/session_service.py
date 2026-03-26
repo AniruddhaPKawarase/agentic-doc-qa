@@ -61,9 +61,9 @@ class SessionService:
         self._lock = threading.Lock()
         self.max_history = max_history_messages
 
-    def create_session(self) -> Session:
-        """Create a new session."""
-        session_id = uuid.uuid4().hex[:16]
+    def create_session(self, session_id: Optional[str] = None) -> Session:
+        """Create a new session. Uses provided session_id or generates one."""
+        session_id = session_id or uuid.uuid4().hex[:16]
         session = Session(
             session_id=session_id,
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -89,12 +89,12 @@ class SessionService:
         return session
 
     def get_or_create(self, session_id: Optional[str] = None) -> Session:
-        """Get existing session or create new one."""
+        """Get existing session or create new one with the given ID."""
         if session_id:
             session = self.get_session(session_id)
             if session:
                 return session
-        return self.create_session()
+        return self.create_session(session_id=session_id)
 
     # ── File deduplication ────────────────────────────────────────────────────
 
