@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # ── Retrieval ─────────────────────────────────────
     retrieval_top_k: int = 8
-    retrieval_score_threshold: float = 0.30
+    retrieval_score_threshold: float = 0.15
     chunk_size_tokens: int = 512
     chunk_overlap_tokens: int = 64
     embedding_batch_size: int = 100

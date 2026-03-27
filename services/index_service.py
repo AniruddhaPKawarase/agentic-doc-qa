@@ -96,6 +96,15 @@ class IndexService:
         k = min(top_k, session_idx.total_vectors)
         scores, indices = session_idx.index.search(query_vector, k)
 
+        # Debug: log all raw scores for diagnosis
+        valid_scores = [float(scores[0][j]) for j in range(len(indices[0])) if indices[0][j] >= 0]
+        logger.info(
+            "FAISS scores session=%s: scores=%s threshold=%.2f",
+            session_id,
+            [f"{s:.4f}" for s in valid_scores[:10]],
+            score_threshold,
+        )
+
         results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx < 0:  # FAISS returns -1 for missing results
