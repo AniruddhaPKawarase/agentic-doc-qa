@@ -17,7 +17,9 @@ Endpoints:
 """
 
 import os
+import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -99,9 +101,36 @@ async def lifespan(app: FastAPI):
         f"Max file: {settings.max_file_size_mb}MB"
     )
 
+    # Start background session cleanup task
+    async def _cleanup_expired_sessions():
+        """Periodically remove expired sessions to prevent OOM from FAISS index accumulation."""
+        interval = settings.session_cleanup_interval_min * 60
+        ttl = timedelta(hours=settings.session_ttl_hours)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                cutoff = datetime.now(timezone.utc) - ttl
+                expired = []
+                for sid, session in list(session_service._sessions.items()):
+                    created = datetime.fromisoformat(session.created_at)
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    if created < cutoff:
+                        expired.append(sid)
+                for sid in expired:
+                    session_service.delete_session(sid)
+                    index_service.delete_session(sid)
+                if expired:
+                    logger.info(f"Session cleanup: removed {len(expired)} expired sessions")
+            except Exception as e:
+                logger.error(f"Session cleanup error: {e}")
+
+    cleanup_task = asyncio.create_task(_cleanup_expired_sessions())
+
     yield
 
     # Cleanup
+    cleanup_task.cancel()
     logger.info("Shutting down Document Q&A Agent...")
     await cache_service.close()
 
@@ -117,8 +146,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=os.getenv("CORS_ORIGINS", "https://ai.ifieldsmart.com,https://ai5.ifieldsmart.com,http://localhost:3000,http://localhost:8501").split(","),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

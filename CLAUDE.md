@@ -470,7 +470,7 @@ WantedBy=multi-user.target
 ### Status: COMPLETED & ACTIVATED (2026-03-23)
 - **STORAGE_BACKEND=s3** set in `.env` — S3 session persistence is LIVE
 - **Bucket:** `agentic-ai-production` | **Region:** `us-east-1` | **Prefix:** `document-qa-agent/`
-- **AWS Key:** `AKIATXJLUBGKPCIQ5TMN` (configured in `.env`)
+- **AWS Key:** `<configured in .env>` (configured in `.env`)
 - **Session restore on startup:** enabled (`S3_RESTORE_SESSIONS_ON_STARTUP=true`, max 50)
 - Modified: `config.py` (6 new S3 settings including restore options)
 - Modified: `services/session_service.py` (S3 persist on create/turn, S3 delete)
