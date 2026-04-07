@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     guard_marginal_low: float = 0.25
     guard_marginal_high: float = 0.50
 
+    # ── v2 Security ──────────────────────────────────────
+    cors_allowed_origins: str = "*"
+    rate_limit_per_minute: int = 30
+
     # ── v2 Monitoring ────────────────────────────────────
     enable_metrics: bool = True
     alert_latency_warning_ms: int = 15000

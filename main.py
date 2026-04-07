@@ -187,10 +187,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS — configurable via CORS_ALLOWED_ORIGINS env var
+_cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "https://ai.ifieldsmart.com,https://ai5.ifieldsmart.com,http://localhost:3000,http://localhost:8501")
+_cors_origins = ["*"] if _cors_origins_raw == "*" else [o.strip() for o in _cors_origins_raw.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "https://ai.ifieldsmart.com,https://ai5.ifieldsmart.com,http://localhost:3000,http://localhost:8501").split(","),
-    allow_credentials=False,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

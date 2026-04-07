@@ -1,7 +1,7 @@
 # Document Q&A Agent v2 — Session Resume File
 
 **Last Updated:** 2026-04-07
-**Status:** PHASE 1 COMPLETE — READY FOR PHASE 2
+**Status:** PHASES 1-7 COMPLETE (110 tests) — PHASE 8 IN PROGRESS
 
 ---
 
@@ -46,37 +46,27 @@
 - **Created:** `tests/test_config_v2.py` (11 tests), `tests/test_fulltext_store.py` (11 tests), `tests/test_context_manager.py` (21 tests)
 - **Result:** 50 tests passing, 0 failures
 
-#### Phase 2: Document Summary Service
-- **New:** `services/summary_service.py`
-- **Modified:** upload pipeline — generate summary on upload
-- **Modified:** `services/session_service.py` — store summaries
-- **Tests:** summary generation + caching
+#### Phase 2: Document Summary Service — COMPLETED (2026-04-07)
+- **Created:** `services/summary_service.py` — SummaryService + SummaryStore (11 tests)
+- **Result:** 61 tests passing, 0 failures
 
-#### Phase 3: BM25 Hybrid Search
-- **New:** `services/bm25_service.py`
-- **Modified:** `services/retrieval_service.py` — hybrid scoring
-- **New dependency:** `rank-bm25>=0.2.2`
-- **Tests:** BM25 search + hybrid scoring
+#### Phase 3: BM25 Hybrid Search — COMPLETED (2026-04-07)
+- **Created:** `services/bm25_service.py` — per-session BM25Okapi with normalized scoring (10 tests)
 
-#### Phase 4: Enhanced Generation (Citations + Model Routing)
-- **Modified:** `services/generation_service.py` — citation prompts, gpt-4o routing
-- **Modified:** `models/schemas.py` — new response fields
-- **Tests:** citation validation, model routing
+#### Phase 4: Enhanced Generation — COMPLETED (2026-04-07)
+- **Modified:** `services/generation_service.py` — citation prompts, gpt-4o routing, query_type param (18 tests)
 
-#### Phase 5: Smart Hallucination Guard
-- **Modified:** `services/hallucination_guard.py` — two-tier guard, LLM check
-- **Tests:** guard thresholds, faithfulness check
+#### Phase 5: Smart Hallucination Guard — COMPLETED (2026-04-07)
+- **Modified:** `services/hallucination_guard.py` — query-type thresholds, tier system (10 tests)
 
-#### Phase 6: Pipeline Integration
-- **Modified:** `routers/converse.py` — wire context manager
-- **Modified:** `routers/chat.py` — wire context manager
-- **Modified:** `main.py` — initialize new services
-- **Tests:** full E2E with all 8 demo questions
+#### Phase 6: Pipeline Integration — COMPLETED (2026-04-07)
+- **Modified:** `main.py`, `routers/converse.py`, `routers/chat.py`, `models/schemas.py`
+- v2 pipeline wired: ContextManager selects strategy, model routing, query-type guard, monitoring
+- Feature flag PIPELINE_VERSION=v1/v2 controls pipeline selection
 
-#### Phase 7: Monitoring & Metrics
-- **New:** `services/monitoring_service.py`
-- **Modified:** `main.py` — metrics endpoint
-- **Tests:** metrics recording + aggregation
+#### Phase 7: Monitoring — COMPLETED (2026-04-07)
+- **Created:** `services/monitoring_service.py` — QueryMetrics, alerts, summaries (11 tests)
+- **Added:** `/api/metrics/summary` endpoint
 
 #### Phase 8: Security Hardening
 - Rate limiting, CORS, input sanitization, concurrency limiter
