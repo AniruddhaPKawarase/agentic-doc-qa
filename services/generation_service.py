@@ -1,12 +1,15 @@
 """
 Generation Service — LLM call with streaming + follow-up question generation.
 ──────────────────────────────────────────────────────────────────────────────
-Builds prompts from context + history, calls gpt-4o-mini, streams tokens.
+Builds prompts from context + history, calls the configured LLM, streams tokens.
 Generates follow-up questions from source context.
 
 v2 (2026-03-26): File-aware prompt builder. When the user uploads files,
 the system prompt explicitly names them and instructs the LLM to scope
 its answer to those files.
+
+v2.1 (2026-04-07): Citation-enforced prompt, model routing (gpt-4o primary,
+gpt-4o-mini for follow-ups), query-type-aware instructions.
 """
 
 import json
@@ -22,17 +25,25 @@ logger = logging.getLogger("docqa.generation")
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT_BASE = """You are a Document Q&A Assistant. You answer questions STRICTLY based on the provided document context.
+SYSTEM_PROMPT_BASE = """You are a Document Q&A Assistant. You answer questions based on the provided document context.
 
-RULES:
-1. ONLY use information from the provided document context to answer.
-2. If the context does not contain enough information to answer, say so clearly.
-3. Never make up facts, statistics, or details not present in the context.
-4. Quote or reference specific parts of the documents when possible.
-5. If the question is completely unrelated to the documents, respond:
-   "I can only answer questions based on your uploaded documents. This question doesn't appear to be covered in the provided documents."
-6. Be concise but thorough. Use bullet points for lists.
-7. When referencing information, mention the source file name."""
+CITATION RULES (MANDATORY):
+1. Every factual claim MUST include a citation: [Source: {filename}, page {N}] or [Source: {filename}, section "{heading}"]
+2. If you cannot cite a claim from the provided context, do not include it.
+3. For summaries, cite the overall document and specific pages for key facts.
+4. When information comes from multiple documents, cite each source separately.
+
+RESPONSE RULES:
+1. Answer questions thoroughly using ONLY the provided document context.
+2. If the context does not contain enough information, say so clearly with what IS available.
+3. Match the user's question style - concise for simple questions, detailed for complex ones.
+4. Use bullet points, tables, or paragraphs as appropriate for the content.
+5. For summaries and overviews, cover ALL major topics in the document.
+6. For specific questions, quote relevant text when helpful.
+
+OUT-OF-CONTEXT:
+If the question is completely unrelated to the provided documents, respond:
+"This question doesn't appear to be covered in the uploaded documents. The documents contain information about: [list key topics]. Could you ask about one of these topics?\""""
 
 FILE_SCOPE_INSTRUCTION = """
 FILE AWARENESS (CRITICAL — FOLLOW STRICTLY):
@@ -46,6 +57,12 @@ GLOBAL_SCOPE_INSTRUCTION = """
 FILE AWARENESS:
 The user has multiple documents in this session. Answer using ALL available documents.
 Always clearly indicate which file each piece of information comes from."""
+
+QUERY_TYPE_INSTRUCTIONS = {
+    "general": "\nQUERY TYPE: This is a general/overview question. Provide a comprehensive answer covering all relevant aspects of the document(s). Cite the document name and major sections.",
+    "specific": "\nQUERY TYPE: This is a specific factual question. Provide a precise answer with exact citations (page numbers, section headings).",
+    "comparison": "\nQUERY TYPE: This is a comparison question. Structure your answer to clearly compare/contrast the items, citing each source separately.",
+}
 
 FOLLOWUP_PROMPT = """Based on the document context provided, generate exactly {count} follow-up questions that:
 1. Are directly answerable from the document content
@@ -64,13 +81,18 @@ class GenerationService:
         self.model = settings.openai_chat_model
         self.max_output_tokens = settings.openai_max_output_tokens
         self.min_followups = settings.min_followup_questions
+        # v2.1 model routing
+        self.primary_model = settings.primary_model
+        self.secondary_model = settings.secondary_model
+        self.primary_max_output_tokens = settings.primary_max_output_tokens
 
     def _build_system_prompt(
         self,
         current_files: Optional[List[str]] = None,
         scope_mode: str = "global",
+        query_type: str = "specific",
     ) -> str:
-        """Build system prompt with file awareness."""
+        """Build system prompt with file awareness and query-type instruction."""
         prompt = SYSTEM_PROMPT_BASE
 
         if current_files and scope_mode in ("current_upload", "referenced_file"):
@@ -86,6 +108,9 @@ class GenerationService:
         else:
             prompt += GLOBAL_SCOPE_INSTRUCTION
 
+        # Append query-type-aware instruction
+        prompt += QUERY_TYPE_INSTRUCTIONS.get(query_type, "")
+
         return prompt
 
     def _build_messages(
@@ -95,9 +120,10 @@ class GenerationService:
         history: Optional[List[Dict]] = None,
         current_files: Optional[List[str]] = None,
         scope_mode: str = "global",
+        query_type: str = "specific",
     ) -> List[Dict]:
         """Build message list for the LLM call."""
-        system_prompt = self._build_system_prompt(current_files, scope_mode)
+        system_prompt = self._build_system_prompt(current_files, scope_mode, query_type)
         messages = [{"role": "system", "content": system_prompt}]
 
         # Add conversation history (already filtered by session service)
@@ -122,17 +148,25 @@ USER QUESTION: {query}"""
         history: Optional[List[Dict]] = None,
         current_files: Optional[List[str]] = None,
         scope_mode: str = "global",
+        query_type: str = "specific",
+        model_override: Optional[str] = None,
     ) -> Dict:
         """
         Blocking generation. Returns full response + token usage.
+
+        Uses primary_model by default (gpt-4o). Pass model_override to
+        route to a different model (e.g. secondary for cheaper calls).
         """
-        messages = self._build_messages(query, context, history, current_files, scope_mode)
+        messages = self._build_messages(
+            query, context, history, current_files, scope_mode, query_type,
+        )
+        model = model_override or self.primary_model
         start = time.perf_counter()
 
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=model,
             messages=messages,
-            max_tokens=self.max_output_tokens,
+            max_tokens=self.primary_max_output_tokens,
             temperature=0.1,
         )
 
@@ -154,16 +188,23 @@ USER QUESTION: {query}"""
         history: Optional[List[Dict]] = None,
         current_files: Optional[List[str]] = None,
         scope_mode: str = "global",
+        query_type: str = "specific",
+        model_override: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Streaming generation. Yields text chunks as they arrive.
+
+        Uses primary_model by default. Pass model_override to route elsewhere.
         """
-        messages = self._build_messages(query, context, history, current_files, scope_mode)
+        messages = self._build_messages(
+            query, context, history, current_files, scope_mode, query_type,
+        )
+        model = model_override or self.primary_model
 
         stream = await self.client.chat.completions.create(
-            model=self.model,
+            model=model,
             messages=messages,
-            max_tokens=self.max_output_tokens,
+            max_tokens=self.primary_max_output_tokens,
             temperature=0.1,
             stream=True,
         )
@@ -189,7 +230,7 @@ USER QUESTION: {query}"""
 
         try:
             response = await self.client.chat.completions.create(
-                model=self.model,
+                model=self.secondary_model,
                 messages=messages,
                 max_tokens=300,
                 temperature=0.3,
