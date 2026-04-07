@@ -49,3 +49,4 @@ sessions/
 # Claude Code internal
 CLAUDE.md
 claude_code_config.json
+_archive/
