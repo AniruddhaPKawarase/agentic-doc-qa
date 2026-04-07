@@ -29,19 +29,42 @@ MIN_WORD_LENGTH = 4
 class HallucinationGuard:
     """Check LLM output groundedness against source context."""
 
-    def __init__(self, threshold: float = 0.65, enabled: bool = True):
+    def __init__(
+        self,
+        threshold: float = 0.35,
+        enabled: bool = True,
+        general_threshold: float = 0.20,
+        specific_threshold: float = 0.30,
+        comparison_threshold: float = 0.25,
+        marginal_low: float = 0.25,
+        marginal_high: float = 0.50,
+    ):
         self.threshold = threshold
         self.enabled = enabled
+        self.general_threshold = general_threshold
+        self.specific_threshold = specific_threshold
+        self.comparison_threshold = comparison_threshold
+        self.marginal_low = marginal_low
+        self.marginal_high = marginal_high
+
+    def _get_threshold(self, query_type: str) -> float:
+        """Resolve groundedness threshold based on query type."""
+        thresholds = {
+            "general": self.general_threshold,
+            "comparison": self.comparison_threshold,
+            "specific": self.specific_threshold,
+        }
+        return thresholds.get(query_type, self.specific_threshold)
 
     def _extract_tokens(self, text: str) -> Set[str]:
         """Extract meaningful tokens from text."""
         words = re.findall(r'\b\w{%d,}\b' % MIN_WORD_LENGTH, text.lower())
         return {w for w in words if w not in STOPWORDS}
 
-    def check(self, answer: str, context: str) -> Dict:
+    def check(self, answer: str, context: str, query_type: str = "specific") -> Dict:
         """
         Score groundedness of answer against context.
-        Returns {groundedness, passed, answer_tokens, matched_tokens}.
+        Returns {groundedness, passed, answer_tokens, matched_tokens, tier}.
         """
         if not self.enabled:
             return {
@@ -49,6 +72,7 @@ class HallucinationGuard:
                 "passed": True,
                 "answer_tokens": 0,
                 "matched_tokens": 0,
+                "tier": "disabled",
             }
 
         answer_tokens = self._extract_tokens(answer)
@@ -60,29 +84,39 @@ class HallucinationGuard:
                 "passed": True,
                 "answer_tokens": 0,
                 "matched_tokens": 0,
+                "tier": "tier1",
             }
 
         matched = answer_tokens & context_tokens
         groundedness = len(matched) / len(answer_tokens)
 
-        # Floor at 0.40 — very short answers shouldn't score too low
-        groundedness = max(groundedness, 0.40) if len(answer_tokens) < 10 else groundedness
+        if len(answer_tokens) < 10:
+            groundedness = max(groundedness, 0.40)
 
-        passed = groundedness >= self.threshold
+        threshold = self._get_threshold(query_type)
 
-        if not passed:
-            logger.warning(
-                f"Hallucination guard triggered: groundedness={groundedness:.2f} "
-                f"(threshold={self.threshold}), "
-                f"{len(matched)}/{len(answer_tokens)} tokens matched"
-            )
-
-        return {
+        result = {
             "groundedness": round(groundedness, 3),
-            "passed": passed,
             "answer_tokens": len(answer_tokens),
             "matched_tokens": len(matched),
         }
+
+        if groundedness >= self.marginal_high:
+            result.update({"passed": True, "tier": "tier1"})
+        elif groundedness < threshold:
+            logger.warning(
+                f"Guard triggered: groundedness={groundedness:.2f}, "
+                f"threshold={threshold}, query_type={query_type}"
+            )
+            result.update({"passed": False, "tier": "tier1"})
+        else:
+            logger.info(
+                f"Guard marginal: groundedness={groundedness:.2f}, "
+                f"threshold={threshold}, query_type={query_type}"
+            )
+            result.update({"passed": True, "tier": "tier1_marginal"})
+
+        return result
 
     def generate_clarification_questions(
         self,
