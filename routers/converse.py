@@ -146,6 +146,42 @@ async def _upload_phase(
             session_service.add_file_hash(session_id, file_hash)
             new_chunks += len(processed.chunks)
 
+            # ── v2: Store full text + BM25 index + summary ──────────
+            if settings.pipeline_version == "v2":
+                fulltext_store = request.app.state.fulltext_store
+                bm25_service = request.app.state.bm25_service
+
+                # Collect page texts from the processed chunks
+                page_texts = [c.text for c in processed.chunks]
+
+                # Store full text (combine all chunk texts)
+                full_text = "\n".join(c.text for c in processed.chunks)
+                fulltext_store.store(session_id, file_name, full_text, page_texts)
+
+                # BM25 index
+                bm25_service.index_chunks(session_id, processed.chunks)
+
+                # Summary generation (async, non-blocking)
+                if settings.enable_summary_generation:
+                    import asyncio
+                    summary_service = request.app.state.summary_service
+                    summary_store = request.app.state.summary_store
+
+                    async def _gen_summary(
+                        _svc=summary_service,
+                        _store=summary_store,
+                        _sid=session_id,
+                        _fname=file_name,
+                        _text=full_text,
+                    ):
+                        try:
+                            summary = await _svc.generate_summary(_fname, _text)
+                            _store.store(_sid, _fname, summary)
+                        except Exception as exc:
+                            logger.warning(f"Summary generation failed for {_fname}: {exc}")
+
+                    asyncio.create_task(_gen_summary())
+
             file_results.append(FileInfo(
                 file_name=file_name,
                 file_type=ext,
@@ -205,6 +241,203 @@ async def _query_phase(
         query=query,
         session_file_names=session_file_names,
     )
+
+    # ── v2 Pipeline ──────────────────────────────────────────────────────
+    if settings.pipeline_version == "v2":
+        context_manager = request.app.state.context_manager
+        summary_store = request.app.state.summary_store
+        monitoring_service = request.app.state.monitoring_service
+
+        # Build context payload (classifies query + selects strategy)
+        payload = context_manager.select_strategy(
+            session_id, query, file_names=target_files or None,
+        )
+
+        # Build context text based on strategy
+        retrieval = None
+        sources = []
+
+        if payload.strategy.value == "full_context" and settings.enable_full_context:
+            fulltext_store = request.app.state.fulltext_store
+            context = fulltext_store.get_session_text(
+                session_id, file_names=target_files or None,
+            )
+            sources = [
+                {"file_name": fn, "chunk_index": 0, "page_number": None,
+                 "sheet_name": None, "score": 1.0, "text_preview": "Full document context"}
+                for fn in payload.file_names
+            ]
+
+        elif payload.strategy.value == "summary_plus_retrieval":
+            summaries = summary_store.get_session_summaries(
+                session_id, file_names=target_files or None,
+            )
+            retrieval = await retrieval_service.retrieve(
+                session_id, query, target_files=target_files, scope_mode=scope_mode,
+            )
+            log.record_step(
+                "retrieval",
+                embedding_tokens=retrieval.embedding_tokens,
+                elapsed_ms=retrieval.retrieval_ms,
+            )
+            chunk_context = retrieval.build_context(settings.max_context_tokens)
+            context = (
+                f"=== DOCUMENT SUMMARIES ===\n{summaries}\n\n"
+                f"=== RELEVANT SECTIONS ===\n{chunk_context}"
+            )
+            sources = [
+                {"file_name": c.file_name, "chunk_index": c.chunk_index,
+                 "page_number": c.page_number, "sheet_name": c.sheet_name,
+                 "score": round(s, 3), "text_preview": c.text[:200]}
+                for c, s in retrieval.chunks
+            ]
+
+        else:
+            # RETRIEVAL_ONLY (default)
+            retrieval = await retrieval_service.retrieve(
+                session_id, query, target_files=target_files, scope_mode=scope_mode,
+            )
+            log.record_step(
+                "retrieval",
+                embedding_tokens=retrieval.embedding_tokens,
+                elapsed_ms=retrieval.retrieval_ms,
+            )
+
+            if not retrieval.has_results:
+                return {
+                    "answer": (
+                        "I can only answer questions based on your uploaded documents. "
+                        "Your question doesn't appear to be covered in the provided documents. "
+                        "Please rephrase or upload relevant documents."
+                    ),
+                    "sources": [],
+                    "follow_up_questions": [
+                        "Could you rephrase your question to relate to the uploaded documents?",
+                        "Would you like to upload additional documents that cover this topic?",
+                        "What specific section of the documents are you interested in?",
+                    ],
+                    "groundedness_score": 0.0,
+                    "needs_clarification": True,
+                    "clarification_questions": [],
+                    "token_usage": {"embedding_tokens": retrieval.embedding_tokens},
+                    "pipeline_ms": {
+                        "retrieval_ms": retrieval.retrieval_ms,
+                        "total_ms": retrieval.retrieval_ms,
+                    },
+                    "cached": False,
+                    "context_strategy": payload.strategy.value,
+                    "query_type": payload.query_type.value,
+                    "model_used": payload.model,
+                }
+
+            context = retrieval.build_context(settings.max_context_tokens)
+            sources = [
+                {"file_name": c.file_name, "chunk_index": c.chunk_index,
+                 "page_number": c.page_number, "sheet_name": c.sheet_name,
+                 "score": round(s, 3), "text_preview": c.text[:200]}
+                for c, s in retrieval.chunks
+            ]
+
+        # Generate with v2 model routing + query type
+        qt = payload.query_type.value
+        history = session_service.build_history_messages(session_id)
+        result = await generation_service.generate(
+            query, context, history,
+            current_files=target_files or None,
+            scope_mode=scope_mode,
+            query_type=qt,
+            model_override=payload.model,
+        )
+        log.record_step(
+            "generation",
+            prompt_tokens=result["prompt_tokens"],
+            completion_tokens=result["completion_tokens"],
+            elapsed_ms=result["llm_ms"],
+        )
+        answer = result["answer"]
+
+        # Guard with query type
+        guard_start = time.perf_counter()
+        guard_result = hallucination_guard.check(answer, context, query_type=qt)
+        guard_ms = (time.perf_counter() - guard_start) * 1000
+
+        needs_clarification = not guard_result["passed"]
+        clarification_questions = []
+        if needs_clarification:
+            clarification_questions = hallucination_guard.generate_clarification_questions(
+                context, count=settings.min_followup_questions,
+            )
+            answer = (
+                "I'm not confident enough to answer this accurately based on the documents. "
+                "Let me ask some clarifying questions to help you better:"
+            )
+
+        follow_ups = await generation_service.generate_followups(
+            context[:5000], answer, settings.min_followup_questions,
+        )
+
+        total_ms = (time.perf_counter() - pipeline_start) * 1000
+        cost = token_tracker.estimate_cost(log)
+
+        session_service.add_turn(session_id, "user", query)
+        session_service.add_turn(
+            session_id, "assistant", answer,
+            groundedness=guard_result["groundedness"],
+        )
+        session_service.add_tokens(session_id, log.total_tokens)
+
+        # Record monitoring metrics
+        if settings.enable_metrics:
+            from services.monitoring_service import QueryMetrics
+            from datetime import datetime, timezone
+            monitoring_service.record(QueryMetrics(
+                session_id=session_id,
+                query_type=qt,
+                context_strategy=payload.strategy.value,
+                model_used=payload.model,
+                total_tokens=log.total_tokens,
+                estimated_cost_usd=cost,
+                latency_ms=total_ms,
+                groundedness_score=guard_result["groundedness"],
+                guard_passed=guard_result["passed"],
+                cached=False,
+                file_count=len(payload.file_names),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            ))
+
+        retrieval_ms = retrieval.retrieval_ms if retrieval else 0.0
+        response_data = {
+            "answer": answer,
+            "sources": sources,
+            "follow_up_questions": follow_ups,
+            "groundedness_score": guard_result["groundedness"],
+            "needs_clarification": needs_clarification,
+            "clarification_questions": clarification_questions,
+            "token_usage": {
+                "embedding_tokens": log.total_embedding_tokens,
+                "prompt_tokens": log.total_prompt_tokens,
+                "completion_tokens": log.total_completion_tokens,
+                "total_tokens": log.total_tokens,
+                "estimated_cost_usd": cost,
+            },
+            "pipeline_ms": {
+                "retrieval_ms": round(retrieval_ms, 1),
+                "llm_ms": round(result["llm_ms"], 1),
+                "guard_ms": round(guard_ms, 1),
+                "total_ms": round(total_ms, 1),
+            },
+            "cached": False,
+            "context_strategy": payload.strategy.value,
+            "query_type": qt,
+            "model_used": payload.model,
+        }
+
+        if not needs_clarification:
+            await cache_service.set(session_id, query, response_data)
+
+        return response_data
+
+    # ── v1 Pipeline (original — unchanged below this line) ───────────────
 
     # ── Cache check (skip cache when scoped to specific files) ────────────
     if scope_mode == "global":
@@ -421,6 +654,9 @@ async def converse(
         token_usage=TokenUsage(**data.get("token_usage", {})),
         pipeline_ms=PipelineTimings(**data.get("pipeline_ms", {})),
         cached=data.get("cached", False),
+        context_strategy=data.get("context_strategy"),
+        query_type=data.get("query_type"),
+        model_used=data.get("model_used"),
     )
 
 

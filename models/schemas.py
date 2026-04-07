@@ -66,6 +66,9 @@ class ChatResponse(BaseModel):
     token_usage: TokenUsage = TokenUsage()
     pipeline_ms: PipelineTimings = PipelineTimings()
     cached: bool = False
+    context_strategy: Optional[str] = None
+    query_type: Optional[str] = None
+    model_used: Optional[str] = None
 
 
 # ── Stream Event ──────────────────────────────────────────────────────────────
@@ -105,6 +108,9 @@ class ConverseResponse(BaseModel):
     token_usage: TokenUsage = TokenUsage()
     pipeline_ms: PipelineTimings = PipelineTimings()
     cached: bool = False
+    context_strategy: Optional[str] = None
+    query_type: Optional[str] = None
+    model_used: Optional[str] = None
 
 
 # ── Session ───────────────────────────────────────────────────────────────────

@@ -71,6 +71,10 @@ async def lifespan(app: FastAPI):
     hallucination_guard = HallucinationGuard(
         threshold=settings.groundedness_threshold,
         enabled=settings.hallucination_guard_enabled,
+        general_threshold=settings.guard_general_threshold,
+        specific_threshold=settings.guard_specific_threshold,
+        comparison_threshold=settings.guard_general_threshold + 0.05,
+        marginal_high=settings.guard_marginal_high,
     )
     token_tracker = TokenTracker(
         chat_model=settings.openai_chat_model,
@@ -80,6 +84,35 @@ async def lifespan(app: FastAPI):
         l1_maxsize=settings.cache_l1_maxsize,
         l1_ttl=settings.cache_l1_ttl,
         redis_url=settings.redis_url,
+    )
+
+    # ── v2 Services (Hybrid Context Pipeline) ────────────────────────────
+    from services.fulltext_store import FullTextStore
+    from services.context_manager import ContextManager
+    from services.summary_service import SummaryService, SummaryStore
+    from services.bm25_service import BM25Service
+    from services.monitoring_service import MonitoringService
+
+    fulltext_store = FullTextStore()
+    context_manager = ContextManager(
+        fulltext_store=fulltext_store,
+        full_context_threshold=settings.full_context_threshold,
+        summary_threshold=settings.summary_threshold,
+        primary_model=settings.primary_model,
+    )
+    summary_service = SummaryService(
+        api_key=settings.openai_api_key,
+        model=settings.secondary_model,
+    )
+    summary_store = SummaryStore()
+    bm25_service = BM25Service()
+    monitoring_service = MonitoringService(
+        latency_warning_ms=settings.alert_latency_warning_ms,
+        latency_critical_ms=settings.alert_latency_critical_ms,
+        cost_warning_usd=settings.alert_cost_warning_usd,
+        cost_critical_usd=settings.alert_cost_critical_usd,
+        groundedness_warning=settings.alert_groundedness_warning,
+        groundedness_critical=settings.alert_groundedness_critical,
     )
 
     # Attach to app.state for dependency injection
@@ -94,9 +127,19 @@ async def lifespan(app: FastAPI):
     app.state.token_tracker = token_tracker
     app.state.cache_service = cache_service
 
+    # Attach v2 services to app.state
+    app.state.fulltext_store = fulltext_store
+    app.state.context_manager = context_manager
+    app.state.summary_service = summary_service
+    app.state.summary_store = summary_store
+    app.state.bm25_service = bm25_service
+    app.state.monitoring_service = monitoring_service
+
     logger.info(
         f"Document Q&A Agent ready | "
+        f"Pipeline: {settings.pipeline_version} | "
         f"Model: {settings.openai_chat_model} | "
+        f"Primary: {settings.primary_model} | "
         f"Embedding: {settings.openai_embedding_model} | "
         f"Max file: {settings.max_file_size_mb}MB"
     )
@@ -200,6 +243,20 @@ async def health():
         "active_sessions": len(sessions),
         "total_indexed_vectors": sum(indices.values()),
         "max_file_size_mb": settings.max_file_size_mb,
+    }
+
+
+# ── Metrics ──────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/metrics/summary")
+async def metrics_summary():
+    """Dashboard metrics summary."""
+    monitoring = app.state.monitoring_service
+    return {
+        "1h": monitoring.get_summary(hours=1.0),
+        "24h": monitoring.get_summary(hours=24.0),
+        "7d": monitoring.get_summary(hours=168.0),
     }
 
 
